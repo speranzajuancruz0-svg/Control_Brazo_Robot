@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Control Coordenado de Brazo Robot</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+<style>
+  body { font-family: Arial, sans-serif; background-color: #121214; color: #ffffff; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+  h1 { margin-bottom: 5px; color: #ffb020; }
+  #status { padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: bold; margin-bottom: 20px; text-transform: uppercase; }
+  .connected { background-color: #2e7d32; color: #fff; }
+  .disconnected { background-color: #c62828; color: #fff; }
+  .btn-emergency { width: 100%; max-width: 500px; background-color: #ff5c5c; color: white; border: none; padding: 16px; font-size: 18px; font-weight: bold; border-radius: 12px; cursor: pointer; text-transform: uppercase; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(255,92,92,0.3); }
+  .control-panel { width: 100%; max-width: 500px; background-color: #1a1a1e; padding: 25px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+  .motor-group { margin-bottom: 25px; background: #222226; padding: 15px; border-radius: 8px; }
+  .motor-label { display: flex; justify-content: space-between; font-size: 17px; font-weight: bold; }
+  
+  /* ESTILO PARA EL INDICADOR DEL ENCODER REAL */
+  .encoder-feedback { margin-top: 6px; font-size: 13px; color: #ffb020; background-color: rgba(255, 176, 32, 0.1); padding: 4px 8px; border-radius: 4px; display: inline-block; }
+  
+  input[type="range"] { -webkit-appearance: none; width: 100%; height: 14px; border-radius: 7px; background: #3a3a42; outline: none; margin: 15px 0; cursor: pointer; }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; border-radius: 50%; border: 2px solid #ffffff; cursor: pointer; }
+  #slider1::-webkit-slider-thumb { background: #ff7a59; }
+  #slider2::-webkit-slider-thumb { background: #5ce0a0; }
+  #slider3::-webkit-slider-thumb { background: #5ca8ff; }
+  .btn-send-coords { width: 100%; background-color: #ffb020; color: #000; border: none; padding: 15px; font-size: 16px; font-weight: bold; border-radius: 8px; cursor: pointer; text-transform: uppercase; margin-top: 10px; transition: background 0.2s; }
+  .btn-send-coords:hover { background-color: #e59e1c; }
+  .btn-spin { width: 100%; background-color: #3a3a42; color: white; border: none; padding: 8px; font-size: 12px; font-weight: bold; border-radius: 6px; cursor: pointer; text-transform: uppercase; margin-top: 5px; }
+  .btn-spin.active { background-color: #3ddc84; color: #000; }
+</style>
+</head>
+<body>
+
+  <h1>Control de Brazo Robot</h1>
+  <div id="status" class="disconnected">Desconectado</div>
+
+  <button class="btn-emergency" onclick="paradaDeEmergencia()">⚠️ DETENER TODO (STOP) ⚠️</button>
+
+  <div class="control-panel">
+    <div class="motor-group">
+      <div class="motor-label">
+        <span>Eje X (Base)</span>
+        <span id="val1">0°</span>
+      </div>
+      <!-- Indicador visual del Encoder AS5600 -->
+      <div class="encoder-feedback">📍 Ángulo Real (AS5600): <strong id="encoderX_val">0.00°</strong></div>
+      <input type="range" id="slider1" min="0" max="360" value="0" oninput="actualizaVisual(1, this.value)">
+      <button id="btnSpin1" class="btn-spin" data-state="off" onclick="giroInfinito('ejeX', 1)">Giro Infinito</button>
+    </div>
+
+    <div class="motor-group">
+      <div class="motor-label"><span>Eje Y (Hombro)</span><span id="val2">0°</span></div>
+      <input type="range" id="slider2" min="0" max="360" value="0" oninput="actualizaVisual(2, this.value)">
+      <button id="btnSpin2" class="btn-spin" data-state="off" onclick="giroInfinito('ejeY', 2)">Giro Infinito</button>
+    </div>
+
+    <div class="motor-group">
+      <div class="motor-label"><span>Eje Z (Codo)</span><span id="val3">0°</span></div>
+      <input type="range" id="slider3" min="0" max="360" value="0" oninput="actualizaVisual(3, this.value)">
+      <button id="btnSpin3" class="btn-spin" data-state="off" onclick="giroInfinito('ejeZ', 3)">Giro Infinito</button>
+    </div>
+
+    <button class="btn-send-coords" onclick="enviarPuntoXYZ()">🚀 Enviar Coordenadas [X, Y, Z]</button>
+  </div>
+
+<script>
+  const BROKER_HOST = "192.168.0.184";  
+  const BROKER_PORT = 9001; 
+  const CLIENT_ID = "web_motores_" + Math.random().toString(16).substring(2, 10);
+
+  const client = new Paho.MQTT.Client(BROKER_HOST, BROKER_PORT, CLIENT_ID);
+  const statusDiv = document.getElementById("status");
+
+  client.onConnectionLost = () => { 
+    statusDiv.className = "disconnected"; 
+    statusDiv.textContent = "Desconectado · Reintentando..."; 
+    setTimeout(conectarMQTT, 3000); 
+  };
+
+  // LECTURA DE MENSAJES MQTT ENTRANTES
+  client.onMessageArrived = (message) => {
+    if (message.destinationName === "motores/encoder/X") {
+      const angulo = parseFloat(message.payloadString).toFixed(2);
+      document.getElementById("encoderX_val").textContent = angulo + "°";
+    }
+  };
+
+  function conectarMQTT() { 
+    client.connect({ 
+      onSuccess: () => { 
+        statusDiv.className = "connected"; 
+        statusDiv.textContent = "Conectado"; 
+        // Nos suscribimos al tópico del encoder
+        client.subscribe("motores/encoder/X");
+      }, 
+      onFailure: () => { 
+        setTimeout(conectarMQTT, 3000); 
+      }, 
+      useSSL: false 
+    }); 
+  }
+  
+  conectarMQTT();
+
+  function actualizaVisual(idNum, valor) {
+    document.getElementById(`val${idNum}`).textContent = valor + "°";
+  }
+
+  // ENVÍO EN GRUPO TIPO JSON (ÁNGULOS DIRECTOS)
+  function enviarPuntoXYZ() {
+    const x = document.getElementById("slider1").value;
+    const y = document.getElementById("slider2").value;
+    const z = document.getElementById("slider3").value;
+
+    const paquetePunto = { x: parseFloat(x), y: parseFloat(y), z: parseFloat(z) };
+    enviarMQTT("punto", JSON.stringify(paquetePunto));
+  }
+
+  function giroInfinito(topicSuffix, idNum) {
+    const btn = document.getElementById(`btnSpin${idNum}`);
+    if (btn.getAttribute("data-state") === "off") {
+      btn.setAttribute("data-state", "on"); btn.classList.add("active"); btn.textContent = "Detener Giro";
+      document.getElementById(`val${idNum}`).textContent = "∞";
+      enviarMQTT(topicSuffix, "CON");
+    } else {
+      resetBotonGiro(idNum);
+      document.getElementById(`slider${idNum}`).value = 0; document.getElementById(`val${idNum}`).textContent = "0°";
+      enviarMQTT(topicSuffix, "STP"); 
+    }
+  }
+
+  function paradaDeEmergencia() {
+    for (let i = 1; i <= 3; i++) {
+      document.getElementById(`slider${i}`).value = 0; document.getElementById(`val${i}`).textContent = "0°";
+      resetBotonGiro(i);
+    }
+    enviarMQTT("punto", JSON.stringify({x: 0, y: 0, z: 0}));
+    enviarMQTT("ejeX", "STP"); enviarMQTT("ejeY", "STP"); enviarMQTT("ejeZ", "STP");
+  }
+
+  function resetBotonGiro(idNum) {
+    const btn = document.getElementById(`btnSpin${idNum}`);
+    btn.setAttribute("data-state", "off"); btn.classList.remove("active"); btn.textContent = "Giro Infinito";
+  }
+
+  function enviarMQTT(topicSuffix, payload) {
+    if (client.isConnected()) {
+      const mensaje = new Paho.MQTT.Message(payload.toString());
+      mensaje.destinationName = `motores/${topicSuffix}`;
+      mensaje.qos = 1; 
+      client.send(mensaje);
+    }
+  }
+</script>
+</body>
+</html>
